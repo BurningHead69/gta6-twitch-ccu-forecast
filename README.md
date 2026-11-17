@@ -21,16 +21,21 @@ In one sentence: **a launch's later hours are predicted from its
 hour-1 print and from how busy its category was in the day before
 release, using only past launches that unlocked the same way.**
 
-- **Log-log regression per hour.** For each hour h = 2..24,
+- **Log-log regression per hour (v6: weighted + ridge).** For each hour h = 2..24,
   `log(viewers_h) = a_h + b_h * log(hour-1 viewers)
   + c_h * log(pre-day peak / hour-1 viewers)
   + d_h * console_only + e_h * log(channels at hour 1)`, fitted by
-  least squares on the case's comparables. The slope `b_h` falls
-  smoothly from ~1.06 at hour 2 to ~0.65 in the evening: big hour-1
-  launches stay roughly flat, small hour-1 launches rise several-fold
-  as the US unlocks and prime time arrives. The coefficients are
-  smoothed across neighbouring hours, and the spread is 1.15× the
-  per-hour residual SD (floored at 0.18 log units).
+  weighted least squares on the case's comparables, with a ridge
+  penalty of 0.5 on every coefficient except the intercept.
+  Early-access-contaminated comparables (an affirmed "early access"
+  mention in their unlock notes; 11 of 38) are down-weighted to 0.5.
+  The slope `b_h` falls smoothly from ~1.06 at hour 2 to ~0.65 in
+  the evening: big hour-1 launches stay roughly flat, small hour-1
+  launches rise several-fold as the US unlocks and prime time
+  arrives. The coefficients are smoothed across neighbouring hours,
+  and the spread is 1.15× the per-hour residual SD (floored at
+  0.18 log units), modulated by exp(−2 · (target pre-48h slope −
+  mean train pre-48h slope)) — see NOTES.md section 10.
 - **Console-only launches rise more.** Of the gradual comparables,
   the 8 console-only ones peak at a median 2.66× hour 1, vs 1.26×
   for the 17 multi-platform ones. GTA VI is console-only, so the
@@ -49,6 +54,19 @@ release, using only past launches that unlocked the same way.**
   simultaneous launch", which misclassified God of War Ragnarök.
   v2 strips negated phrases before testing for an affirmed
   simultaneous unlock.
+- **Streams layer (v7, unvalidated gamble).** If the case ships
+  `streams` — the top 20 live streams at the last read before the
+  checkpoint — two small, capped adjustments apply last, on top of
+  the v6 forecast: the viewer-weighted mean stream age shifts the
+  early-hour median by at most ±0.10 log units (old top streams =
+  the Asia-Pacific wave winding down before the US unlocks; young
+  top streams = the EU/UK wave just started), and the Herfindahl
+  concentration of the top-20 shares scales the spread by 0.90–1.20×.
+  The two spread layers multiply, so when the streams spread layer
+  is active the combined multiplier is clipped to [0.90, 1.20]
+  relative to the base spread; with streams absent v7 is identical
+  to v6. Streams are null in every practice case, so this effect
+  cannot be validated locally — see NOTES.md section 10.
 - **Fallbacks:** if too few gradual comparables are usable, train on
   all of them; if no fit is possible at all, fall back to the house
   baseline (persistence with a widening spread). The output is always
@@ -87,21 +105,27 @@ from the other launches):
 |---|---|---|---|
 | House baseline (persistence) | 0.278 | 0.323 | 0.930 |
 | v1 (submitted) | 0.178 | 0.166 | 0.343 |
-| **v2 (this entry)** | **0.165** | **0.148** | **0.339** |
+| v2 (submitted, practice 0.180) | 0.165 | 0.148 | 0.339 |
+| **v6 (this entry's base)** | **0.159** | **0.144** | **0.330** |
+| **v7 (this entry: v6 + streams layer)** | **0.159** | **0.144** | **0.330** |
 
-v2: 90% coverage 0.847, typical median miss 22.4% on the gradual
-launches (v1: 0.890 / 28.0%). The practice answers are not in the kit,
+v7's LOO is identical to v6's (streams are null in practice, so
+the streams layer is inactive there — verified per-case, max
+difference 0.000000). v7: 90% coverage and typical median miss on
+the gradual launches are reported in NOTES.md section 10. The practice answers are not in the kit,
 so no practice loss can be computed locally — the practice-proxy
 evaluation was checked and found not to exist in the kit (no case
 holds another case's answer); the house baseline's published practice
-loss is ~0.387, and v1's public practice loss was 0.289. Full tables,
-every model tried, and the honest limits of the LOO evidence in
-[NOTES.md](NOTES.md).
+loss is ~0.387, v1's public practice loss was 0.289, and v2's public
+practice loss is 0.180 (rank ~1237–1417 of ~4900–5500, moving with
+the leaderboard). Full tables, every model tried, and the honest limits
+of the LOO evidence in [NOTES.md](NOTES.md).
 
-> **Status:** v5 is built and verified here but **not yet submitted**
-> and has no repo. The submitted entry remains v2
-> (repo BurningHead69/gta6-twitch-ccu-forecast, commit 4fb443a,
-> submission 01a1e959, practice loss 0.180). v5 is v2 plus a small,
-> UNVALIDATED `streams` adjustment (see NOTES.md §10): when the
-> case ships no streams it is byte-identical to v2. Submit from
-> this directory only as an explicit gamble on the final case.
+> **Status:** v7 is built and verified here but **not yet submitted**
+> and has no repo. The current final entry on make.fun is v5
+> (streams gamble, repo BurningHead69/gta6-twitch-ccu-forecast,
+> commit f37bc5c7, submission 01a1e9de-8475-761c-b635-9078dfc3f1e1).
+> v6 was never submitted; it is v7's base model, and v7 adds v5's
+> streams layer on top of it. With streams absent v7 is
+> byte-identical to v6, so its practice loss is expected to equal
+> v6's (~0.173 if LOO transfers one-to-one).

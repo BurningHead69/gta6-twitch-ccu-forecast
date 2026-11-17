@@ -1,4 +1,4 @@
-# Notes — model, validation, and risks (v2)
+# Notes — model, validation, and risks (v6; v2's notes carried over, plus §9)
 
 Entry for make.fun `gta6-twitch-ccu-forecast-01`. The program is
 `main.py` (Python 3.13, stdlib only). This file records how the model
@@ -489,125 +489,372 @@ comparables' range.
   launches (37 total). A single unusual launch moves the mean by
   ~0.004. The model is deliberately simple — five coefficients per
   hour, smoothed — to avoid fitting noise in that small sample.
-- **v2 is submitted; v5 is not.** The submitted entry is v2 (repo
-  BurningHead69/gta6-twitch-ccu-forecast, commit 4fb443a,
-  submission 01a1e959-aa45-77e4-98d5-3609e23cb939, practice loss
-  0.180, rank 1237/4861). This directory (v5) has no repo and no
-  submission; see §10 before submitting from it.
+- **v7 is not yet submitted.** This directory has no repo and no
+  submission; the current final entry on make.fun is v5 (repo
+  BurningHead69/gta6-twitch-ccu-forecast, commit f37bc5c7,
+  submission 01a1e9de-8475-761c-b635-9078dfc3f1e1). v6 was never
+  submitted. See §10 before submitting from this directory.
 
-## 10. v5: the `streams` adjustment (2026-11-17) — a bounded, unvalidated gamble
+## 9. v6 investigation (2026-11-17) — the kitchen-sink combination, adopted for the practice push
 
-> **v5 verdict: v5 is v2 plus a small streams adjustment that cannot
-> be validated on practice.** The user explicitly chose this gamble
-> after v3 and v4 both failed to beat v2. When `streams` is absent
-> (every practice case, and every LOO pseudo-case) v5 is
-> byte-identical to v2: LOO gradual 0.1653 / median 0.1258,
-> console-only 0.1481 / 0.1164, all 0.3386, sharp 0.6995, high-p1
-> 0.1426 — reproduced exactly with the v4 LOO harness pointed at
-> this directory. The streams effect itself has NO measured
-> validation anywhere: it could help or hurt the final. Do not
-> present v5 as "better than v2" — present it as "v2 plus an
-> unvalidated bet".
+> **v6 verdict: the kitchen-sink combination is adopted, with the
+> EA detection switched from tier label to text mention.** The
+> combination was first measured by v3/v4 and never shipped; v6
+> implements it in `main.py` and reproduces its LOO numbers
+> exactly with a fresh harness (`~/workspace/makefun/v6-exp/loo6.py`,
+> which imports the shipped `forecast_case` and builds synthetic
+> pseudo-cases from the comparables in `p00.in`, one held out at
+> a time, notes in case-note style, regime from the curve's own
+> step — the same harness design as v3/v4). The user explicitly
+> asked for another push toward the top 1000 of the practice
+> leaderboard (rank 1000 needs practice loss ~0.167; v2/v5 sit
+> at 0.180, rank ~1417) and was told the gain is modest and
+> uncertain. **This directory is not yet submitted**; the
+> submitted entry on make.fun is v5 (streams gamble, commit
+> f37bc5c7, submission 01a1e9de-8475-761c-b635-9078dfc3f1e1),
+> before that v2 (commit 4fb443a, submission
+> 01a1e959-aa45-77e4-98d5-3609e23cb939, practice loss 0.180).
+> v6 contains **no** streams layer: streams are null in
+> practice, and v6 is aimed at the practice leaderboard.
 
-### 10.1 Schema audit — what `streams` actually is
+### The combination, exactly as implemented
 
-Documented identically in RULES.txt ("Your input"), competition.yaml
-§"The case", the starter's docstring, and the house-forecast source
-in the kit's harness tarball (`grader/house-forecast-twitch-ccu.ts`,
-`streams: Array<{login: string; viewers: number; language: string |
-null; started_at: string | null}> | null`):
+Per hour, weighted least squares with a ridge penalty, on the
+same five v2 features (intercept, log hour-1, clipped
+log(pre24max / hour 1), console-only indicator, clipped log
+channels at hour 1), coefficients smoothed 0.25/0.5/0.25 across
+hours, spread 1.15x residual SD (floor 0.18, cap 0.90), same
+regime split, negation fix, and feature-drop fallback as v2:
 
-- The category's **top 20 live streams at the last valid read
-  before the checkpoint** (end of hour 1), each with exactly four
-  fields: `login` (string), `viewers` (number), `language`
-  (string or null), `started_at` (ISO 8601 string or null).
-- **Null in every practice case** (verified in p00–p03).
-- No follower counts, no display names, no game/title, no
-  per-stream channel data. `language` and `started_at` may be null
-  per stream.
-- The case-builder itself is not in the kit's harness tarball (that
-  tarball is the platform source, not the recorder); the four-field
-  schema above is the documented guarantee, and the code parses
-  defensively against anything else.
+1. **Early-access down-weighting.** Training curves flagged as
+   early-access are weighted 0.5 in the per-hour fit (all other
+   curves 1.0). Two detectors were tested on the comparables'
+   `unlock` text:
+   - **text** (shipped): any affirmed "early access" /
+     "early-access" mention, negations ("no early access",
+     "not early access", "never early access", "no
+     early-access", "without early access") stripped first.
+     Flags 11 of 38 comparables: Hogwarts Legacy, Call of Duty:
+     Black Ops 6, Call of Duty: Modern Warfare III, 007 First
+     Light, Forza Horizon 6, Starfield, Diablo IV, Assassin's
+     Creed Shadows, DOOM: The Dark Ages, Death Stranding 2: On
+     the Beach, Forza Horizon 5.
+   - **tier**: only the literal "Tier: early-access-contaminated"
+     label. Flags 9 (the text set minus Black Ops 6 and Modern
+     Warfare III).
+2. **Ridge λ = 0.5**, added to the diagonal of the weighted
+   normal equations for every coefficient except the intercept
+   (raw, unstandardised — exactly as in the v4 experiment code
+   that produced the reference numbers).
+3. **Spread modulation × exp(−2 · (target pre_slope48 − mean
+   train pre_slope48))**, applied after the spread floor/cap
+   with no re-clipping. pre_slope48 is the OLS slope of log
+   viewers on hour index over the 48 hours before day_start
+   (≥ 6 usable hourly rows, else 0.0 for a training curve and
+   modulation skipped for a target with no usable rows). The
+   training mean is over the same regime-filtered training set
+   the fit used. Residual SDs are computed from *unweighted*
+   residuals of the smoothed fit, as in v4.
 
-### 10.2 Hunt for validation data in the kit — none exists
+### Reproduced LOO numbers (fresh harness, grader scale)
 
-- Comparables carry only aggregate hourly `{viewers, channels}` —
-  no per-stream or channel-distribution data at any hour. The
-  channel count at hour 1 is already a v2 feature (log-channels);
-  nothing in the kit says how hour-1 viewers were distributed
-  across streams, so the concentration hypothesis cannot be tested
-  on comparables.
-- `history` / `history_hourly` are aggregate too. The GTA VI
-  category's own pre-release comparable is aggregate. `levels`,
-  `checkpoint`, `day_start`, `forecast` carry no stream data.
-- `categories_hourly` is also null in practice and is not used.
-- Conclusion: there is no test in the kit that can turn this gamble
-  into evidence. The only checks possible are the ones in §10.4:
-  LOO equality when streams are absent, and synthetic direction /
-  cap / fallback tests.
+Baseline v2 reproduced exactly first: gradual **0.1653 /
+0.1258**, console-only **0.1481 / 0.1164**, all **0.3386 /
+0.2060**, sharp 0.6995; high-hour-1 test (train on gradual
+hour-1 ≤ 200k, test the 6 gradual launches with hour-1 >
+200k) **0.1426** — the harness is faithful.
 
-### 10.3 The adjustment (features, signs, caps)
+| variant (all: + ridge 0.5 + spread −2 unless noted) | gradual mean / median | console-only mean / median | all mean / median | sharp | high-p1 |
+|---|---|---|---|---|---|
+| v2 | 0.1653 / 0.1258 | 0.1481 / 0.1164 | 0.3386 / 0.2060 | 0.6995 | 0.1426 |
+| **EA tier w0.5 (the v4 reference combo)** | **0.1598 / 0.1332** | **0.1437 / 0.1146** | **0.3304 / 0.1902** | 0.6856 | **0.1334** |
+| **EA text w0.5 (shipped v6)** | **0.1585 / 0.1258** | **0.1435 / 0.1171** | **0.3302 / 0.1997** | 0.6877 | **0.1375** |
+| EA tier w0.7 | 0.1602 / 0.1251 | 0.1443 / 0.1141 | 0.3310 / 0.1967 | 0.6868 | 0.1350 |
+| EA text w0.7 | 0.1596 / 0.1244 | 0.1443 / 0.1151 | 0.3310 / 0.2027 | 0.6880 | — |
+| EA tier w0.5 + ridge 1.0 | 0.1631 / 0.1319 | 0.1494 / 0.1172 | 0.3309 / 0.1975 | 0.6806 | — |
+| EA tier w0.5 + spread −1.5 | 0.1597 / 0.1328 | 0.1441 / 0.1150 | 0.3306 / 0.1896 | 0.6866 | — |
+| EA tier w0.5 + spread −2.5 | 0.1602 / 0.1335 | 0.1434 / 0.1142 | 0.3303 / 0.1916 | 0.6847 | — |
+| EA tier w0.5, no spread | 0.1605 / 0.1322 | 0.1461 / 0.1164 | 0.3325 / 0.1942 | 0.6908 | — |
+| EA tier w0.5 only (no ridge, no spread) | 0.1623 / 0.1273 | 0.1473 / 0.1227 | 0.3363 / 0.1857 | 0.6986 | — |
 
-Applied on top of the fitted v2 median `mu` and spread `sd`, per
-hour, only when `streams` is a list with >= 5 entries whose
-`viewers` is a finite positive number (other entries ignored;
-`started_at` must parse as ISO 8601 to count for age):
+The tier combination reproduces v4's numbers **exactly**
+(0.1598 / 0.1332, 0.1437 / 0.1146, 0.3304 / 0.1902, high-p1
+0.1334, paired t −0.92, improved 14/25) — the shipped
+implementation is a faithful port of the experiment code, not
+a re-derivation.
 
-| feature | mechanism and sign | formula | cap / window |
+### Why text was shipped instead of tier
+
+- Gradual mean: text **0.1585** vs tier 0.1598 (v2: 0.1653).
+- Gradual median: text **0.1258, equal to v2's**; tier 0.1332
+  is worse than v2's. Text is the only variant tested whose
+  median does not collapse (the w0.7 variants are 0.1244–0.1251
+  but their means are worse, 0.1596–0.1602).
+- Paired gradual vs v2: text mean diff **−0.0068, SE 0.0055,
+  t = −1.24**, improved 15/25, worsened 10/25; tier −0.0055,
+  t = −0.92, 14/25. Console-only paired: text −0.0046
+  (improved 4/8), tier −0.0045 (4/8).
+- All-launches mean: text 0.3302 (best tested), tier 0.3304.
+- High-hour-1 test: text 0.1375 vs tier 0.1334 vs v2 0.1426 —
+  tier is better here, but both beat v2, and text wins the
+  other three populations. The selection criterion was LOO mean
+  *and* high-hour-1 with the median intact; text is the best
+  overall compromise, tier the best on high-hour-1 alone.
+- Coverage and typical miss (gradual; typical miss = median
+  |median forecast − truth| / truth over all gradual
+  case-hours): v2 0.847 / 19.6% → v6-text **0.875 / 19.1%**.
+  (v2's published typical miss of 22.4% used a slightly
+  different aggregation in the v2 experiment code; the
+  v2→v6 comparison here is computed with identical code, so
+  the delta is the meaningful part.)
+
+### Per-case LOO, v6-text vs v2 (gradual launches)
+
+| launch | v2 | v6-text | diff |
 |---|---|---|---|
-| Viewer-weighted mean stream age at the checkpoint | At 01:00Z the live top streams are the early wave: NZ/AU/Asia streamers 10–14 h into their day, EU/UK 1–2 h in, US not yet unlocked (05:00Z/08:00Z). High weighted age = the top of the category is still the Asia-Pacific wave, near the end of its day, winding down before the US arrives → hours 2–5 sag. Low age = the EU/UK wave dominates, its streamers just started launch sessions → hours 2–5 hold up. | shift = −0.02 × (age − 5 h), age clipped to [0, 16] h | \|shift\| ≤ 0.10 log units; full weight hours 2–5, fading to 0 at hour 9 |
-| Herfindahl concentration of top-20 viewer shares | Concentration is idiosyncratic risk, not level: one big streamer ending moves the category total; a diffuse audience self-averages. Touches only the spread. | spread mult = 1 + 0.5 × (HHI − 0.10), HHI = Σ share² | mult clipped to [0.90, 1.20]; full weight hours 2–8, fading to 1 at hour 12 |
+| Marvel Rivals | 0.222 | 0.134 | −0.088 |
+| Death Stranding 2 | 0.315 | 0.257 | −0.058 |
+| Forza Horizon 6 | 0.222 | 0.173 | −0.049 |
+| Starfield | 0.346 | 0.305 | −0.041 |
+| Call of Duty: Black Ops 7 | 0.112 | 0.094 | −0.018 |
+| Hogwarts Legacy | 0.170 | 0.153 | −0.017 |
+| The Last of Us Part II | 0.084 | 0.069 | −0.015 |
+| Call of Duty: Black Ops 6 | 0.351 | 0.337 | −0.014 |
+| Cyberpunk 2077 | 0.118 | 0.110 | −0.008 |
+| Diablo IV | 0.206 | 0.200 | −0.006 |
+| Ghost of Yōtei | 0.126 | 0.121 | −0.004 |
+| Elden Ring Nightreign | 0.088 | 0.084 | −0.004 |
+| Call of Duty: Modern Warfare 4 | 0.125 | 0.122 | −0.003 |
+| Stellar Blade | 0.110 | 0.107 | −0.003 |
+| ELDEN RING | 0.084 | 0.083 | −0.001 |
+| Saros | 0.123 | 0.126 | +0.003 |
+| Ghost of Tsushima | 0.090 | 0.095 | +0.005 |
+| Call of Duty: Modern Warfare III | 0.100 | 0.106 | +0.007 |
+| FINAL FANTASY VII REBIRTH | 0.105 | 0.113 | +0.007 |
+| 007 First Light | 0.152 | 0.167 | +0.015 |
+| Assassin's Creed Shadows | 0.110 | 0.125 | +0.015 |
+| DOOM: The Dark Ages | 0.144 | 0.167 | +0.023 |
+| Borderlands 4 | 0.204 | 0.227 | +0.024 |
+| Zelda: Tears of the Kingdom | 0.232 | 0.260 | +0.028 |
+| Forza Horizon 5 | 0.195 | 0.227 | +0.032 |
 
-Deliberately unused: `language` — no clean sign (a high English
-share at 01:00Z is UK/NZ/AU, not the US evening wave; a high
-Spanish share could be LATAM, whose midnight is 03:00–05:00Z, or
-Spain at 23:00Z — the sign flips by region, so it is not used).
-Also deliberately not used: top-20 coverage (Σ top-20 / p1) — it
-double-counts concentration, and the last-minute snapshot vs the
-hour-mean print makes it noisy.
+The gains concentrate in v2's worst, early-access-contaminated
+cases (Marvel Rivals, Death Stranding 2, Forza Horizon 6,
+Starfield) — the mechanism the down-weighting targets — and
+the worst losses are small (+0.032 at most) and spread across
+mid-tier launches. No single case dominates the mean gain the
+way Death Stranding 2 did for the v3 EA indicator.
 
-Failure modes guarded against: streams present with a different
-schema (unknown fields ignored; `viewers` must be a finite positive
-number; booleans rejected; `started_at` unparseable → that stream
-drops out of the age average, HHI still computed); a single huge
-stream dominating hour 1 (HHI drives the spread to at most ×1.20,
-median untouched by concentration); streams started days earlier
-(24/7 or pre-launch waiting streams — age clipped at 16 h);
-`checkpoint` missing or unparseable (age neutral, HHI still
-computed); fewer than 5 usable entries (whole adjustment off).
-When the regression itself cannot be fitted, v5 falls back to the
-house baseline exactly as v2 does (no streams adjustment there).
+### Honest warning — read before submitting
 
-Known counter-reading (documented, not resolved): a stream that
-has already lasted 10+ h is a survivor — marathon launch streamers
-may be *more* likely to keep going than a fresh stream. The
-region-mix reading above is the basis for the sign, and the 0.10
-cap is what bounds the damage if the counter-reading is right.
+- The gain is modest and uncertain: gradual mean −0.0068 with
+  SE 0.0055 (t = −1.24) on n = 25. That is better than v3/v4's
+  best combos (t ≈ −1.0) and the median is intact, but it is
+  still within the range where a different 25 launches could
+  flip the sign. The practice improvement is **not
+  guaranteed**: v6's practice loss is expected to be near
+  0.180 − 0.007 ≈ 0.173 if LOO transfers one-to-one, which
+  would put it around rank ~1000 — but LOO-to-practice
+  transfer has already surprised us once (v1: LOO 0.178,
+  practice 0.289), and the practice set is only 4 launches.
+- The ridge (λ = 0.5, raw, unstandardised) is nearly
+  negligible next to X′X entries of ~10³; its contribution is
+  ~0.001–0.002 of the gain. The spread modulation is worth
+  ~0.001–0.002 (no-spread: 0.1605 vs 0.1598 tier). The bulk of
+  the gain is the EA down-weighting.
+- The EA text detector depends on the case authors' research
+  notes in the comparables' `unlock` field. If the final case's
+  comparables phrase early access differently, fewer or more
+  curves get down-weighted; the effect is bounded (weights
+  0.5–1.0) and the model degrades toward v2, not toward
+  nonsense.
+- v6 does not include v5's streams layer. If v6 is submitted
+  it supersedes v5, and the final case loses the streams
+  adjustment (which was itself an unvalidated gamble). That
+  trade-off — a measured practice gain vs an unvalidated final
+  gamble — is the user's call, not the model's.
 
-### 10.4 Validation performed
+## 10. v7: the merge — v6's model plus v5's streams layer (2026-11-17)
 
-- **LOO, streams absent:** gradual 0.1653 / 0.1258 (n=25),
-  console-only 0.1481 / 0.1164 (n=8), all 0.3386 / 0.2060 (n=37),
-  sharp 0.6995 (n=12), high-p1 0.1426 — identical to v2.
-- **Practice outputs byte-identical to v2** (streams None in
-  p00–p03); deterministic byte-identical reruns; ~0.19 s for all
-  four cases (~0.05 s/case).
-- **Synthetic tests** (p00 copied, streams attached; v5 output
-  compared with v2 on the same files; median shift = log ratio of
-  medians, spread mult = ratio of log(q95/q05) widths):
+> **v7 verdict: v7 is v6 plus v5's streams layer, nothing else.**
+> With streams absent (every practice case, every LOO
+> pseudo-case) v7 is byte-identical to v6: LOO gradual
+> 0.1585 / 0.1258, console-only 0.1435 / 0.1171, all 0.3302 /
+> 0.1997, sharp 0.6877, high-hour-1 0.1375 — reproduced with
+> the v6 harness (`~/workspace/makefun/v6-exp/loo6.py`) pointed
+> at v7's shipped `forecast_case`, per-case loss difference
+> vs v6 exactly 0.000000 on all 37 launches. The streams
+> effect itself is unvalidated (see v5's §10, carried over
+> below in outline); v7's practice loss is expected to equal
+> v6's, because streams are null in practice. **This
+> directory is not yet submitted**; the current final entry
+> on make.fun is v5 (streams gamble, commit f37bc5c7,
+> submission 01a1e9de-8475-761c-b635-9078dfc3f1e1). v6 was
+> never submitted.
 
-| scenario | median shift h2 / h5 / h8 / h9 | spread mult h2 / h8 / h12 | verdict |
-|---|---|---|---|
-| young EU-heavy (ages 0.2–1 h, near-equal viewers) | +0.090 / +0.090 / +0.022 / 0 | 0.978 / 0.978 / 1.000 | intended direction, within caps |
-| old APAC-heavy (ages 10–14 h) | −0.100 / −0.100 / −0.025 / 0 | 0.978 / 0.978 / 1.000 | capped at −0.10 as designed |
-| concentrated (one stream 60% of top-20) | +0.080 / +0.080 / +0.020 / 0 | 1.141 / 1.141 / 1.000 | spread widens, median from age only |
-| diffuse (20 equal streams) | +0.060 / +0.060 / +0.015 / 0 | 0.975 / 0.975 / 1.000 | narrower spread as designed |
-| extreme (one stream 95%, age 16 h) | −0.100 / −0.100 / −0.025 / 0 | 1.200 / 1.200 / 1.000 | both caps bind, output still valid |
-| streams None / [] / "junk" / no-viewers rows / only 3 entries | 0 / 0 / 0 / 0 | 1.000 everywhere | byte-identical to v2 |
-| started_at garbage / null for all | median 0 | 0.975 | age neutral, HHI still applied |
-| checkpoint key deleted | median 0 | 0.978 | age neutral, HHI still applied |
+### What was merged, exactly
 
-All synthetic outputs valid (23 rows, hours 2–24, 5 finite
-non-decreasing quantiles each, > 0, ≤ 1e9). No synthetic case
-exceeded the ±0.10 median cap or the [0.90, 1.20] spread range.
+`main.py` is v6's file with three changes, and no change to
+any fitting code:
+
+1. v5's streams block copied verbatim: the `STREAMS_*`
+   constants and `streams_adjustment(case)` (viewer-weighted
+   mean stream age → median shift, max ±0.10 log units,
+   full weight hours 2–5 fading to 0 at hour 9; Herfindahl
+   concentration of the top-20 shares → spread multiplier
+   1 + 0.5 × (HHI − 0.10) clipped to [0.90, 1.20], full
+   weight hours 2–8 fading to 1 at hour 12; `language`
+   unused; {} when streams are None, empty, malformed, or
+   have fewer than 5 usable entries).
+2. The hour loop computes `streams_adj` once and applies it
+   **last**, after v6's spread modulation, exactly as v5
+   applied it after v2's spread: `mu += shift`, then the
+   spread step below. The baseline fallback is untouched
+   (no streams adjustment there, as in v5).
+3. The docstring gains a v7 section; nothing else in the
+   model description changed.
+
+### The one interaction: the spread, and the clipping rule
+
+v6's spread multiplier is unbounded (`spread_mult =
+exp(−2 · (target pre_slope48 − mean train pre_slope48))`,
+applied after the floor/cap with no re-clipping); v5's
+streams multiplier is in [0.90, 1.20]. The two multiply,
+so their product is unbounded in principle. The merge
+bounds it as follows, per hour:
+
+- Let `sd_base` be v2's base spread: the floored/capped
+  `1.15 × residual SD` *before* v6's modulation.
+- v6 alone: `sd = sd_base × spread_mult`.
+- v7, when the streams spread layer is active at that hour
+  (`smult != 1.0`): `sd = sd_base × clip(spread_mult ×
+  smult, 0.90, 1.20)`. The FINAL multiplier relative to
+  `sd_base` is therefore always in [0.90, 1.20] wherever
+  the streams layer touches the spread.
+- v7, when streams are absent, or `smult == 1.0` at that
+  hour (hours ≥ 12, or HHI exactly 0.10): `sd` is v6's
+  exactly. The clip is a property of the streams layer, so
+  it only engages where that layer is active — this is
+  what makes v7 byte-identical to v6 with streams absent
+  (verification 1) and LOO-identical (verification 3).
+  v5's absolute re-clip to [0.18, 0.90] is *not* applied
+  in v7; it is replaced by this relative clip, so in
+  principle the final sd can reach 0.162–1.08 (in practice
+  `sd_base` is ~0.21–0.42, so the point is moot).
+
+Worked example (p00, measured): v6's `spread_mult` is
+0.814 (the target's pre-48h slope is above the training
+mean, so v6 narrows the spread). The streams multiplier
+for a diffuse top-20 is 0.975, so the unclipped product
+would be 0.794 — below 0.90 — and the clip binds:
+final multiplier 0.900, i.e. v7's spread is 1.106× v6's
+in hours 2–8. For a concentrated top-20 (smult 1.134)
+the product is 0.923, inside the range, no clipping, and
+v7's spread ratio vs v6 is 1.134 — exactly v5's. For the
+extreme case (smult 1.20) the product is 0.977, ratio
+1.200, again exactly v5's. Consequence worth stating
+plainly: because all four practice cases have v6
+`spread_mult` below 0.90 (p00 0.814, p01 0.872, p02 0.845,
+p03 0.939), the streams layer can only *widen* v7's
+spread relative to v6 when it is active — it can never
+narrow it below 0.90× base. That is the clipping rule
+doing its job, not a bug: the combined multiplier is
+bounded on both sides.
+
+### Verification performed
+
+**1. Streams None: v7 byte-identical to v6.** `main.py`
+run on all 4 kit practice inputs for both directories;
+`diff -r` clean on all four `.out` files. Determinism:
+a second v7 run writes byte-identical files.
+
+**2. Synthetic streams tests** (p00 copied, streams
+attached; v7 compared with v6 on the same files; v5
+compared with v2 on the same files, for the "same
+direction and caps" check; median shift = log ratio of
+medians, spread ratio = ratio of log(q95/q05) widths,
+final multiplier = v7 effective sd / `sd_base`, where
+`sd_base` is measured by running v7 with `SPREAD_A = 0`
+and streams None):
+
+| scenario | v7 median shift h2 / h5 / h8 / h9 | v5 median shift (same) | v7 spread ratio vs v6 h2 / h8 / h12 | v5 spread ratio vs v2 | v7 final mult vs base h2 / h5 / h8 / h11 |
+|---|---|---|---|---|---|
+| young EU-heavy (ages 0.2–1 h, near-equal) | +0.091 / +0.091 / +0.023 / 0 | +0.091 / +0.091 / +0.023 / 0 | 1.106 / 1.106 / 1.000 | 0.976 / 0.976 / 1.000 | 0.900 / 0.900 / 0.900 / 0.900 (clip binds low) |
+| old APAC-heavy (ages 10–14 h) | −0.100 / −0.100 / −0.025 / 0 | −0.100 / −0.100 / −0.025 / 0 | 1.106 / 1.106 / 1.000 | 0.976 / 0.976 / 1.000 | 0.900 (clip binds low) |
+| concentrated (one stream 60%, age 1 h) | +0.080 / +0.080 / +0.020 / 0 | +0.080 / +0.080 / +0.020 / 0 | 1.134 / 1.134 / 1.000 | 1.134 / 1.134 / 1.000 | 0.923 / 0.923 / 0.923 / 0.900 |
+| diffuse (20 equal, age 2 h) | +0.060 / +0.060 / +0.015 / 0 | +0.060 / +0.060 / +0.015 / 0 | 1.106 / 1.106 / 1.000 | 0.975 / 0.975 / 1.000 | 0.900 (clip binds low) |
+| extreme (one stream 95%, age 16 h) | −0.100 / −0.100 / −0.025 / 0 | −0.100 / −0.100 / −0.025 / 0 | 1.200 / 1.200 / 1.000 | 1.200 / 1.200 / 1.000 | 0.977 / 0.977 / 0.977 / 0.900 |
+| streams None / [] / "junk" / no-viewers rows / only 3 entries | 0 | 0 | 1.000 everywhere | 1.000 | byte-identical to v6 |
+| started_at garbage / null for all | median 0 | median 0 | HHI still applied (spread differs, as in v5) | same | — |
+| checkpoint key deleted | median 0 | median 0 | 1.106 (HHI applied, clip binds) | 0.978 | — |
+
+Median shifts match v5's **exactly** in every scenario
+(the +0.091 vs the +0.090 in v5's §10 table is quantile
+rounding to 2 decimals; both v5 and v7 measure +0.091 on
+these payloads). Spread ratios vs base match v5's
+exactly wherever the combined clip does not bind
+(concentrated, extreme, and hour 12 everywhere); where
+it binds (young, old, diffuse on p00) the ratio is 1.106
+instead of ~0.976 — the final multiplier is 0.900
+instead of ~0.794, which is the clipping rule working
+as specified, and the final multiplier is within
+[0.90, 1.20] in every hour where the streams layer is
+active (measured final multipliers equal the exact
+clipped products to < 0.01). No synthetic case exceeded
+the ±0.10 median cap; all synthetic outputs valid.
+
+**3. LOO with streams absent = v6's published numbers.**
+Fresh harness (`~/workspace/makefun/v6-exp/loo6.py`
+imported, pointed at v7's shipped `forecast_case`):
+
+| model | gradual mean / median | console-only mean / median | all mean / median | sharp | high-p1 |
+|---|---|---|---|---|---|
+| v6 reproduced | 0.1585 / 0.1258 | 0.1435 / 0.1171 | 0.3302 / 0.1997 | 0.6877 | 0.1375 |
+| **v7** | **0.1585 / 0.1258** | **0.1435 / 0.1171** | **0.3302 / 0.1997** | **0.6877** | **0.1375** |
+
+Per-case loss difference v7 − v6: max 0.000000 across
+all 37 launches. (The harness first reproduced v6's
+published numbers exactly, so the comparison is against
+a faithful baseline, not a stale table.)
+
+**4. Validity, determinism, runtime.** All 4 practice
+outputs valid (23 rows, hours 2–24, 5 finite
+non-decreasing quantiles each, > 0 and ≤ 1e9);
+byte-identical reruns; ~0.21 s for all four cases
+(~0.05 s/case), far under the 8 s per-case cap.
+Stdlib only, deterministic, offline, `main.py` at repo
+root.
+
+### Risks (v7-specific, on top of §8 and §9)
+
+- **The streams gamble is unchanged by the merge.** The
+  streams layer is still unvalidated (null in practice,
+  no validation data in the kit — see v5 §10.2); v7's
+  practice loss is expected to equal v6's, and the
+  streams effect only shows up on the final case.
+  Present v7 as "v6 plus an unvalidated bet", never as
+  "better than v6".
+- **The clip can widen the spread vs v6.** When v6's
+  `spread_mult` is below 0.90 (all four practice cases),
+  the combined clip raises v7's spread above v6's by up
+  to ~10.6% in hours 2–8 whenever streams are present
+  and diffuse/young/old. That is the specified bound
+  working as designed, but it means v7's final-case
+  spread is never narrower than 0.90× base while the
+  streams layer is active — v6's narrowing is partly
+  undone. If the final case's `spread_mult` is above
+  1.20 the clip binds the other way instead.
+- **The clip engages only where `smult != 1.0`.** At
+  hours ≥ 12 (spread faded out) and when HHI is exactly
+  0.10, the spread is v6's exactly, including v6's
+  unbounded modulation. That is deliberate: the clip
+  bounds the *interaction*, not v6.
+- **Defensive parsing is inherited from v5 unchanged.**
+  A streams payload with an unexpected schema is ignored
+  field by field (unknown fields, non-numeric viewers,
+  unparseable `started_at`); fewer than 5 usable entries
+  turns the whole layer off. If the final case ships a
+  streams list whose `viewers` are the *hour-mean* print
+  rather than the last-read snapshot, the age/concentration
+  reading is still the documented one — the code cannot
+  tell the difference, and the caps bound the damage.

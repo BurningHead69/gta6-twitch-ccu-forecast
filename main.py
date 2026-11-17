@@ -98,21 +98,69 @@ all, fall back to the house baseline (persistence with a widening
 spread).  Everything is deterministic: inputs are sorted, there is
 no randomness, no clock, no network, and no state between runs.
 
-Model (v5; streams adjustment only -- see NOTES.md section 10)
+Model (v6; v2 plus the "kitchen-sink" combination — see NOTES.md
+section 10)
 ---------------------------------------------------------------
-v5 is v2 plus a small, bounded adjustment from the case's `streams`
-field (the top 20 live streams at the last read before the
-checkpoint, each {login, viewers, language, started_at}; null in
-every practice case, so this is UNVALIDATED -- a gamble the user
-explicitly chose).  Two features: the viewer-weighted mean stream
-age shifts the early-hour median (old top streams = the
-Asia-Pacific wave winding down before the US unlocks, so hours 2-5
-sag; young top streams = the EU/UK wave just started, so hours 2-5
-hold up; at most 0.10 log units), and the Herfindahl concentration
-of the top-20 shares widens or narrows the spread (concentrated
-audiences are idiosyncratic risk; multiplier 0.90-1.20, hours 2-8
-fading out by hour 12).  `language` is unused (no clean sign).  If
-`streams` is absent or unusable, v5 is byte-identical to v2.
+v6 keeps v2's model and adds three small, LOO-measured tweaks
+stacked on top of it:
+
+1.  Early-access down-weighting: comparables whose unlock notes
+    affirm an early-access launch (EA_SOURCE = "text": any
+    affirmed "early access" / "early-access" mention in the
+    unlock text, negations stripped; 11 launches) are
+    down-weighted to EA_WEIGHT (0.5) in the per-hour weighted least
+    squares.  (EA_SOURCE = "tier" — only the literal
+    "Tier: early-access-contaminated" label, 9 launches — was
+    also tested; see NOTES.md section 10.)  Early-access launches
+    have hour 1 already inflated by early-access play, so their
+    release day is flatter than the model expects, and they are
+    v2's worst cases (LOO 0.207 vs 0.142 for the rest);
+    down-weighting them, rather than adding an EA indicator
+    (which is estimated noisily and can point the wrong way), is
+    the most consistent small gain v3/v4 found.
+
+2.  Ridge shrinkage: RIDGE_LAMBDA (0.5) is added to the diagonal
+    of the weighted normal equations for every coefficient except
+    the intercept.  With n ~ 25 training curves and five
+    coefficients per hour, a little shrinkage steadies the fit.
+
+3.  Spread modulation by the pre-release slope: the per-hour
+    spread is multiplied by exp(SPREAD_A * (target pre_slope48 -
+    mean train pre_slope48)), with SPREAD_A = -2.0.  pre_slope48
+    is the OLS slope of log viewers on hour index over the 48
+    hours before day_start.  The slope marks *difficulty*, not
+    level (it correlates -0.38 with v2's LOO loss): launches whose
+    category was rising into release day are easier to predict,
+    so their spread is narrowed; flat or falling pre-histories
+    widen it.  The modulation is applied after the spread
+    floor/cap, with no re-clipping, exactly as validated.  If the
+    target has no usable pre-48h history the modulation is
+    skipped (factor 1.0).
+
+Honest warning (see NOTES.md section 10): the combination's LOO
+gain over v2 is modest and uncertain (gradual mean -0.006,
+paired t ~ -0.9, median worse), and the practice improvement is
+not guaranteed.  v6 is a deliberate push for the practice
+leaderboard, adopted by the user with that warning in view.
+
+Model (v7; v6 plus v5's streams layer — see NOTES.md section 10)
+---------------------------------------------------------------
+v7 is v6's model unchanged (EA text down-weight 0.5, ridge 0.5,
+spread modulation exp(-2 * pre_slope48 deviation)) with v5's
+bounded streams adjustment applied last, on top of v6's
+forecasts, exactly as v5 applied it on top of v2's: the
+viewer-weighted mean stream age shifts the early-hour median by
+at most 0.10 log units, and the Herfindahl concentration of the
+top-20 viewer shares scales the spread by 0.90-1.20x.  The one
+interaction is the spread: v6's spread multiplier is unbounded
+and v5's is in [0.90, 1.20], so when the streams spread layer is
+active at an hour the COMBINED multiplier (v6's times v5's) is
+clipped to [0.90, 1.20] relative to v2's base spread (the spread
+before v6's modulation).  When streams are absent, or the streams
+spread multiplier is 1.0 at an hour, the spread is v6's exactly
+— so with streams absent v7 is byte-identical to v6.  The
+streams effect itself is unvalidated (null in every practice
+case); see NOTES.md section 10.
 """
 
 import json
@@ -154,6 +202,26 @@ LOGCH_CLIP = (1.8, 10.0)
 MIN_GRADUAL = 10
 # A curve needs at least this many of the 24 release-day hours present.
 MIN_HOURS = 20
+# --- v6 "kitchen-sink" constants (see NOTES.md section 10) -----------
+# Training weight for early-access-contaminated comparables.
+EA_WEIGHT = 0.5
+# How early access is detected in a comparable's unlock text:
+# "text" = any affirmed "early access" / "early-access" mention
+# (negations stripped first); "tier" = the literal
+# "Tier: early-access-contaminated" label only.  Text is the
+# default: in the fresh v6 LOO run it beat tier on the gradual
+# mean (0.1585 vs 0.1598) with the median intact (0.1258 vs
+# v2's 0.1258) and the stronger paired t (-1.24 vs -0.92); see
+# NOTES.md section 10.  Text flags 11 launches, tier 9 (the
+# extra two are Black Ops 6 and Modern Warfare III, whose unlock
+# notes mention early access without the tier label).
+EA_SOURCE = "text"
+# Ridge penalty added to the diagonal of the weighted normal
+# equations for every coefficient except the intercept.
+RIDGE_LAMBDA = 0.5
+# Spread modulation coefficient: sd *= exp(SPREAD_A *
+# (target pre_slope48 - mean train pre_slope48)).
+SPREAD_A = -2.0
 
 
 def parse_time(text):
@@ -213,6 +281,59 @@ def fit_ols(xs, ys):
     return solve_linear(matrix, rhs)
 
 
+def fit_wls(xs, ys, ws, ridge=0.0):
+    """Weighted least squares with a ridge penalty on the diagonal.
+
+    Solves (X'WX + ridge * I') beta = X'Wy, where I' is the identity
+    with the intercept entry zeroed (the intercept is not shrunk).
+    Returns None if the system is (near-)singular.
+    """
+    k = len(xs[0])
+    matrix = [[sum(w * row[i] * row[j] for w, row in zip(ws, xs))
+               for j in range(k)] for i in range(k)]
+    rhs = [sum(w * row[i] * y for w, row, y in zip(ws, xs, ys))
+           for i in range(k)]
+    for i in range(1, k):
+        matrix[i][i] += ridge
+    return solve_linear(matrix, rhs)
+
+
+def ea_from_text(text):
+    """1.0 when `text` affirms an early-access launch, else 0.0.
+
+    Negated mentions ("no early access", "not early access", ...)
+    are stripped first, so "no early access" does not count.
+    """
+    t = str(text or "").lower()
+    for negated in ("no early access", "not early access",
+                    "never early access", "no early-access",
+                    "without early access"):
+        t = t.replace(negated, "")
+    return 1.0 if ("early access" in t or "early-access" in t) else 0.0
+
+
+def tier_ea(unlock):
+    """1.0 when the unlock text carries the early-access tier label."""
+    return 1.0 if "early-access-contaminated" in str(unlock or "").lower() else 0.0
+
+
+def ols_slope(pairs):
+    """OLS slope of log viewers on hour index over (idx, viewers) pairs.
+
+    Returns 0.0 when fewer than 6 usable pairs are present.
+    """
+    rows = [(i, math.log(vw)) for i, vw in pairs
+            if isinstance(vw, (int, float)) and vw > 0]
+    if len(rows) < 6:
+        return 0.0
+    mx = sum(i for i, _ in rows) / len(rows)
+    my = sum(y for _, y in rows) / len(rows)
+    den = sum((i - mx) ** 2 for i, _ in rows)
+    if den == 0:
+        return 0.0
+    return sum((i - mx) * (y - my) for i, y in rows) / den
+
+
 def pstdev(values):
     mean = sum(values) / len(values)
     return math.sqrt(sum((v - mean) ** 2 for v in values) / len(values))
@@ -246,6 +367,9 @@ class Curve:
         self.channels = {}
         # Largest hourly viewers in the 24 h before day_start, or None.
         pre_max = None
+        # (hour index, viewers) pairs in the 48 h before day_start,
+        # for the pre-release slope used by the v6 spread modulation.
+        pre48_pairs = []
         for row in hourly:
             try:
                 idx = hour_index(day_start, row["from"])
@@ -264,7 +388,13 @@ class Curve:
             elif -24 <= idx < 0:
                 if pre_max is None or viewers > pre_max:
                     pre_max = float(viewers)
+            if -48 <= idx < 0:
+                pre48_pairs.append((idx, float(viewers)))
         self.pre_max = pre_max
+        self.pre_slope48 = ols_slope(pre48_pairs)
+        # Early-access flags from the unlock text (v6 down-weighting).
+        self.ea_tier = tier_ea(unlock)
+        self.ea_text = ea_from_text(unlock)
 
     @property
     def p1(self):
@@ -295,6 +425,12 @@ class Curve:
             return 0.0
         value = math.log(self.pre_max / self.p1)
         return max(PRE_CLIP[0], min(PRE_CLIP[1], value))
+
+    @property
+    def train_weight(self):
+        """v6 training weight: early-access curves are down-weighted."""
+        ea = self.ea_tier if EA_SOURCE == "tier" else self.ea_text
+        return EA_WEIGHT if ea else 1.0
 
     @property
     def console_only(self):
@@ -382,7 +518,28 @@ def target_pre_max(case, day_start):
     return best
 
 
-# --- streams adjustment (v5; see NOTES.md section 10) -----------------
+def target_pre_slope48(case, day_start):
+    """OLS slope of log viewers on hour index over the 48 h before
+    day_start, from history_hourly (the same hourly measure the
+    comparables use).  Returns None when fewer than 6 usable rows
+    are present, in which case the v6 spread modulation is skipped.
+    """
+    pairs = []
+    for row in case.get("history_hourly") or []:
+        try:
+            idx = hour_index(day_start, row["from"])
+            viewers = row["viewers"]
+        except (KeyError, TypeError, ValueError):
+            continue
+        if (isinstance(viewers, (int, float)) and viewers > 0
+                and idx is not None and -48 <= idx < 0):
+            pairs.append((idx, float(viewers)))
+    if len(pairs) < 6:
+        return None
+    return ols_slope(pairs)
+
+
+# --- streams adjustment (v5 layer, merged into v7; see NOTES.md section 10) ---
 # The final case ships `streams`: the category's top 20 live streams at
 # the last valid read before the checkpoint, each {login, viewers,
 # language, started_at}.  It is null in every practice case, so this
@@ -412,7 +569,7 @@ def target_pre_max(case, day_start):
 # `language` is deliberately unused: it has no clean sign (a high
 # English share at 01:00Z is UK/NZ/AU, not the US evening wave).
 # If `streams` is None, empty, malformed, or has fewer than 5 usable
-# entries, the adjustment is exactly zero and v5 behaves like v2.
+# entries, the adjustment is exactly zero and v7 behaves like v6.
 STREAMS_MIN_ENTRIES = 5
 STREAMS_AGE_CENTER = 5.0      # hours; the neutral weighted mean age
 STREAMS_AGE_SLOPE = 0.02      # log units of median shift per hour of age
@@ -427,7 +584,7 @@ def streams_adjustment(case):
     """Per-hour (median shift, spread multiplier) from `streams`.
 
     Returns a dict {hour: (shift, mult)} for hours 2..24, or {} when
-    the streams field is absent or unusable (v2 behaviour exactly).
+    the streams field is absent or unusable (v6 behaviour exactly).
     Defensive: every field is checked; anything unexpected is ignored
     rather than crashing the run.
     """
@@ -608,6 +765,8 @@ def forecast_case(case):
         return row
 
     # --- fit log viewers_h per hour ------------------------------------
+    # v6: weighted least squares (early-access curves down-weighted)
+    # with a ridge penalty on every coefficient except the intercept.
     # Try the full five-feature fit first; if any hour cannot be
     # fitted (a feature near-constant in this training set, too few
     # curves), drop the last feature for every hour and retry, down
@@ -620,12 +779,14 @@ def forecast_case(case):
         trial = []
         ok = bool(train)
         for hour in hours_to_forecast:
-            xs, ys = [], []
+            xs, ys, ws = [], [], []
             for curve in train:
                 if hour in curve.hours:
                     xs.append(curve_features(curve, n_feat))
                     ys.append(math.log(curve.hours[hour]))
-            beta = fit_ols(xs, ys) if len(xs) >= n_feat + 3 else None
+                    ws.append(curve.train_weight)
+            beta = (fit_wls(xs, ys, ws, RIDGE_LAMBDA)
+                    if len(xs) >= n_feat + 3 else None)
             if beta is None:
                 ok = False
                 break
@@ -640,11 +801,23 @@ def forecast_case(case):
                           for h in hours_to_forecast]}
 
     # Smooth each coefficient across neighbouring hours, then measure
-    # the residual spread of the smoothed fit, per hour.
+    # the residual spread of the smoothed fit, per hour.  Residuals
+    # are unweighted (as validated): the EA down-weighting applies
+    # to the fit, not to the spread measurement.
     for j in range(n_coef):
         smoothed = smooth3([beta[j] for beta in coefs])
         for i in range(len(coefs)):
             coefs[i][j] = smoothed[i]
+
+    # v6 spread modulation: the target's pre-48h slope vs the mean
+    # slope of the training curves.  Computed once, from the same
+    # training set the fit used.
+    target_slope = target_pre_slope48(case, day_start)
+    if target_slope is not None and train:
+        mean_slope = sum(c.pre_slope48 for c in train) / len(train)
+        spread_mult = math.exp(SPREAD_A * (target_slope - mean_slope))
+    else:
+        spread_mult = 1.0
 
     out_hours = []
     streams_adj = streams_adjustment(case)
@@ -661,10 +834,24 @@ def forecast_case(case):
         sd = SD_FLOOR
         if len(residuals) >= 4:
             sd = max(SD_FLOOR, min(SD_CAP, SD_MULT * pstdev(residuals)))
-        # v5 streams adjustment (zero unless the case ships streams).
+        sd_base = sd
+        # v6: apply the spread modulation after the floor/cap, with
+        # no re-clipping, exactly as validated in the LOO harness.
+        sd = sd * spread_mult
+        # v7 streams adjustment (last; zero unless the case ships
+        # streams).  The median shift applies exactly as in v5.
+        # For the spread, the two layers multiply: v6's spread_mult
+        # is unbounded, v5's smult is in [0.90, 1.20].  When the
+        # streams spread layer is active at this hour (smult != 1.0)
+        # the COMBINED multiplier is clipped to [0.90, 1.20]
+        # relative to the v2 base spread sd_base, so the interaction
+        # is bounded.  When streams are absent, or smult == 1.0 at
+        # this hour, the spread is v6's exactly.
         shift, smult = streams_adj.get(hour, (0.0, 1.0))
         mu += shift
-        sd = max(SD_FLOOR, min(SD_CAP, sd * smult))
+        if smult != 1.0:
+            combined = max(0.90, min(1.20, spread_mult * smult))
+            sd = sd_base * combined
         quantiles = []
         previous = 0.0
         for z in Z:
