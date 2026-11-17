@@ -98,6 +98,10 @@ loss is ~0.387, and v1's public practice loss was 0.289. Full tables,
 every model tried, and the honest limits of the LOO evidence in
 [NOTES.md](NOTES.md).
 
-> **Status:** v2 is built and verified here but **not yet submitted**
-> and has no repo. The submitted entry remains v1
-> (repo BurningHead69/gta6-twitch-ccu-forecast, commit 3deff08a).
+> **Status:** v5 is built and verified here but **not yet submitted**
+> and has no repo. The submitted entry remains v2
+> (repo BurningHead69/gta6-twitch-ccu-forecast, commit 4fb443a,
+> submission 01a1e959, practice loss 0.180). v5 is v2 plus a small,
+> UNVALIDATED `streams` adjustment (see NOTES.md §10): when the
+> case ships no streams it is byte-identical to v2. Submit from
+> this directory only as an explicit gamble on the final case.

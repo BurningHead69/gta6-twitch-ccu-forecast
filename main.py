@@ -97,6 +97,22 @@ train on all usable comparables; if no regression can be fitted at
 all, fall back to the house baseline (persistence with a widening
 spread).  Everything is deterministic: inputs are sorted, there is
 no randomness, no clock, no network, and no state between runs.
+
+Model (v5; streams adjustment only -- see NOTES.md section 10)
+---------------------------------------------------------------
+v5 is v2 plus a small, bounded adjustment from the case's `streams`
+field (the top 20 live streams at the last read before the
+checkpoint, each {login, viewers, language, started_at}; null in
+every practice case, so this is UNVALIDATED -- a gamble the user
+explicitly chose).  Two features: the viewer-weighted mean stream
+age shifts the early-hour median (old top streams = the
+Asia-Pacific wave winding down before the US unlocks, so hours 2-5
+sag; young top streams = the EU/UK wave just started, so hours 2-5
+hold up; at most 0.10 log units), and the Herfindahl concentration
+of the top-20 shares widens or narrows the spread (concentrated
+audiences are idiosyncratic risk; multiplier 0.90-1.20, hours 2-8
+fading out by hour 12).  `language` is unused (no clean sign).  If
+`streams` is absent or unusable, v5 is byte-identical to v2.
 """
 
 import json
@@ -366,6 +382,126 @@ def target_pre_max(case, day_start):
     return best
 
 
+# --- streams adjustment (v5; see NOTES.md section 10) -----------------
+# The final case ships `streams`: the category's top 20 live streams at
+# the last valid read before the checkpoint, each {login, viewers,
+# language, started_at}.  It is null in every practice case, so this
+# adjustment is UNVALIDATED -- a bounded gamble the user explicitly
+# chose.  Two features, each with a stated mechanism and a hard cap:
+#
+# * Viewer-weighted mean stream age at the checkpoint.  At 01:00Z the
+#   live top streams are the early wave: New Zealand / Australia /
+#   Asia streamers are 10-14 h into their launch day, Europe / UK
+#   streamers 1-2 h in, and the US has not unlocked yet (05:00Z /
+#   08:00Z).  A high weighted age means the top of the category is
+#   still dominated by the Asia-Pacific wave, whose streamers are
+#   near the end of their day and will wind down before the US
+#   arrives, so hours 2-5 sag; a low age means the EU/UK wave
+#   dominates -- those streamers just started their launch sessions
+#   and will carry hours 2-5.  (The opposite reading -- old streams
+#   are marathon survivors -- is noted in NOTES.md; the region-mix
+#   reading is the basis, and the cap keeps the bet small either
+#   way.)  Shift: -0.02 log units per hour of age above 5 h, hours
+#   2-5 at full weight, fading to zero by hour 9, capped at 0.10.
+# * Concentration (Herfindahl index of the top-20 viewer shares).
+#   A concentrated audience is idiosyncratic risk: one big streamer
+#   ending moves the category total, while a diffuse audience is
+#   self-averaging.  That is variance, not level, so it touches only
+#   the spread: multiplier 1 + 0.5 * (HHI - 0.10), clipped to
+#   [0.90, 1.20], hours 2-8 at full weight, fading to 1 by hour 12.
+# `language` is deliberately unused: it has no clean sign (a high
+# English share at 01:00Z is UK/NZ/AU, not the US evening wave).
+# If `streams` is None, empty, malformed, or has fewer than 5 usable
+# entries, the adjustment is exactly zero and v5 behaves like v2.
+STREAMS_MIN_ENTRIES = 5
+STREAMS_AGE_CENTER = 5.0      # hours; the neutral weighted mean age
+STREAMS_AGE_SLOPE = 0.02      # log units of median shift per hour of age
+STREAMS_AGE_CLIP = (0.0, 16.0)
+STREAMS_SHIFT_CAP = 0.10      # max |median shift|, log units
+STREAMS_HHI_CENTER = 0.10
+STREAMS_HHI_SLOPE = 0.5
+STREAMS_SPREAD_CLIP = (0.90, 1.20)
+
+
+def streams_adjustment(case):
+    """Per-hour (median shift, spread multiplier) from `streams`.
+
+    Returns a dict {hour: (shift, mult)} for hours 2..24, or {} when
+    the streams field is absent or unusable (v2 behaviour exactly).
+    Defensive: every field is checked; anything unexpected is ignored
+    rather than crashing the run.
+    """
+    streams = case.get("streams")
+    if not isinstance(streams, list):
+        return {}
+    entries = []
+    for row in streams:
+        if not isinstance(row, dict):
+            continue
+        viewers = row.get("viewers")
+        if isinstance(viewers, bool) or not isinstance(viewers, (int, float)):
+            continue
+        if viewers <= 0 or viewers != viewers:  # also rejects NaN
+            continue
+        entries.append((float(viewers), row.get("started_at")))
+    if len(entries) < STREAMS_MIN_ENTRIES:
+        return {}
+
+    total = sum(v for v, _ in entries)
+    if total <= 0:
+        return {}
+    # Concentration: Herfindahl index of the top-20 viewer shares.
+    hhi = sum((v / total) ** 2 for v, _ in entries)
+    spread_excess = max(STREAMS_SPREAD_CLIP[0],
+                        min(STREAMS_SPREAD_CLIP[1],
+                            1.0 + STREAMS_HHI_SLOPE * (hhi - STREAMS_HHI_CENTER))) - 1.0
+
+    # Viewer-weighted mean stream age at the checkpoint, in hours.
+    checkpoint = None
+    raw_checkpoint = case.get("checkpoint")
+    if isinstance(raw_checkpoint, str):
+        try:
+            checkpoint = parse_time(raw_checkpoint)
+        except ValueError:
+            checkpoint = None
+    age_num, age_den = 0.0, 0.0
+    if checkpoint is not None:
+        for viewers, started in entries:
+            if not isinstance(started, str):
+                continue
+            try:
+                age = (checkpoint - parse_time(started)).total_seconds() / 3600.0
+            except (TypeError, ValueError):
+                continue
+            age = max(STREAMS_AGE_CLIP[0], min(STREAMS_AGE_CLIP[1], age))
+            age_num += viewers * age
+            age_den += viewers
+    if age_den > 0:
+        shift_base = -STREAMS_AGE_SLOPE * (age_num / age_den - STREAMS_AGE_CENTER)
+        shift_base = max(-STREAMS_SHIFT_CAP, min(STREAMS_SHIFT_CAP, shift_base))
+    else:
+        shift_base = 0.0
+
+    out = {}
+    for hour in range(2, 25):
+        # Median shift: full weight hours 2-5, fading to 0 at hour 9.
+        if hour <= 5:
+            fade = 1.0
+        elif hour <= 8:
+            fade = (9 - hour) / 4.0
+        else:
+            fade = 0.0
+        # Spread: full weight hours 2-8, fading to 1 at hour 12.
+        if hour <= 8:
+            sfade = 1.0
+        elif hour <= 11:
+            sfade = (12 - hour) / 4.0
+        else:
+            sfade = 0.0
+        out[hour] = (shift_base * fade, 1.0 + spread_excess * sfade)
+    return out
+
+
 def baseline_quantiles(p1, hour):
     """The house baseline: persistence with a widening spread."""
     return [round2(p1 * math.exp(z * 0.15 * math.sqrt(hour - 1))) for z in Z]
@@ -511,6 +647,7 @@ def forecast_case(case):
             coefs[i][j] = smoothed[i]
 
     out_hours = []
+    streams_adj = streams_adjustment(case)
     for i, hour in enumerate(hours_to_forecast):
         beta = coefs[i]
         mu = sum(b * x for b, x in zip(beta, target_features(n_coef)))
@@ -524,6 +661,10 @@ def forecast_case(case):
         sd = SD_FLOOR
         if len(residuals) >= 4:
             sd = max(SD_FLOOR, min(SD_CAP, SD_MULT * pstdev(residuals)))
+        # v5 streams adjustment (zero unless the case ships streams).
+        shift, smult = streams_adj.get(hour, (0.0, 1.0))
+        mu += shift
+        sd = max(SD_FLOOR, min(SD_CAP, sd * smult))
         quantiles = []
         previous = 0.0
         for z in Z:

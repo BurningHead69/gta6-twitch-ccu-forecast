@@ -489,7 +489,125 @@ comparables' range.
   launches (37 total). A single unusual launch moves the mean by
   ~0.004. The model is deliberately simple — five coefficients per
   hour, smoothed — to avoid fitting noise in that small sample.
-- **v2 is not yet submitted.** This directory has no repo and no
-  submission; the submitted entry remains v1 (repo
-  BurningHead69/gta6-twitch-ccu-forecast, commit 3deff08a,
-  submission 01a1e916-19f8-773e-98ed-6ae33b3d6de3).
+- **v2 is submitted; v5 is not.** The submitted entry is v2 (repo
+  BurningHead69/gta6-twitch-ccu-forecast, commit 4fb443a,
+  submission 01a1e959-aa45-77e4-98d5-3609e23cb939, practice loss
+  0.180, rank 1237/4861). This directory (v5) has no repo and no
+  submission; see §10 before submitting from it.
+
+## 10. v5: the `streams` adjustment (2026-11-17) — a bounded, unvalidated gamble
+
+> **v5 verdict: v5 is v2 plus a small streams adjustment that cannot
+> be validated on practice.** The user explicitly chose this gamble
+> after v3 and v4 both failed to beat v2. When `streams` is absent
+> (every practice case, and every LOO pseudo-case) v5 is
+> byte-identical to v2: LOO gradual 0.1653 / median 0.1258,
+> console-only 0.1481 / 0.1164, all 0.3386, sharp 0.6995, high-p1
+> 0.1426 — reproduced exactly with the v4 LOO harness pointed at
+> this directory. The streams effect itself has NO measured
+> validation anywhere: it could help or hurt the final. Do not
+> present v5 as "better than v2" — present it as "v2 plus an
+> unvalidated bet".
+
+### 10.1 Schema audit — what `streams` actually is
+
+Documented identically in RULES.txt ("Your input"), competition.yaml
+§"The case", the starter's docstring, and the house-forecast source
+in the kit's harness tarball (`grader/house-forecast-twitch-ccu.ts`,
+`streams: Array<{login: string; viewers: number; language: string |
+null; started_at: string | null}> | null`):
+
+- The category's **top 20 live streams at the last valid read
+  before the checkpoint** (end of hour 1), each with exactly four
+  fields: `login` (string), `viewers` (number), `language`
+  (string or null), `started_at` (ISO 8601 string or null).
+- **Null in every practice case** (verified in p00–p03).
+- No follower counts, no display names, no game/title, no
+  per-stream channel data. `language` and `started_at` may be null
+  per stream.
+- The case-builder itself is not in the kit's harness tarball (that
+  tarball is the platform source, not the recorder); the four-field
+  schema above is the documented guarantee, and the code parses
+  defensively against anything else.
+
+### 10.2 Hunt for validation data in the kit — none exists
+
+- Comparables carry only aggregate hourly `{viewers, channels}` —
+  no per-stream or channel-distribution data at any hour. The
+  channel count at hour 1 is already a v2 feature (log-channels);
+  nothing in the kit says how hour-1 viewers were distributed
+  across streams, so the concentration hypothesis cannot be tested
+  on comparables.
+- `history` / `history_hourly` are aggregate too. The GTA VI
+  category's own pre-release comparable is aggregate. `levels`,
+  `checkpoint`, `day_start`, `forecast` carry no stream data.
+- `categories_hourly` is also null in practice and is not used.
+- Conclusion: there is no test in the kit that can turn this gamble
+  into evidence. The only checks possible are the ones in §10.4:
+  LOO equality when streams are absent, and synthetic direction /
+  cap / fallback tests.
+
+### 10.3 The adjustment (features, signs, caps)
+
+Applied on top of the fitted v2 median `mu` and spread `sd`, per
+hour, only when `streams` is a list with >= 5 entries whose
+`viewers` is a finite positive number (other entries ignored;
+`started_at` must parse as ISO 8601 to count for age):
+
+| feature | mechanism and sign | formula | cap / window |
+|---|---|---|---|
+| Viewer-weighted mean stream age at the checkpoint | At 01:00Z the live top streams are the early wave: NZ/AU/Asia streamers 10–14 h into their day, EU/UK 1–2 h in, US not yet unlocked (05:00Z/08:00Z). High weighted age = the top of the category is still the Asia-Pacific wave, near the end of its day, winding down before the US arrives → hours 2–5 sag. Low age = the EU/UK wave dominates, its streamers just started launch sessions → hours 2–5 hold up. | shift = −0.02 × (age − 5 h), age clipped to [0, 16] h | \|shift\| ≤ 0.10 log units; full weight hours 2–5, fading to 0 at hour 9 |
+| Herfindahl concentration of top-20 viewer shares | Concentration is idiosyncratic risk, not level: one big streamer ending moves the category total; a diffuse audience self-averages. Touches only the spread. | spread mult = 1 + 0.5 × (HHI − 0.10), HHI = Σ share² | mult clipped to [0.90, 1.20]; full weight hours 2–8, fading to 1 at hour 12 |
+
+Deliberately unused: `language` — no clean sign (a high English
+share at 01:00Z is UK/NZ/AU, not the US evening wave; a high
+Spanish share could be LATAM, whose midnight is 03:00–05:00Z, or
+Spain at 23:00Z — the sign flips by region, so it is not used).
+Also deliberately not used: top-20 coverage (Σ top-20 / p1) — it
+double-counts concentration, and the last-minute snapshot vs the
+hour-mean print makes it noisy.
+
+Failure modes guarded against: streams present with a different
+schema (unknown fields ignored; `viewers` must be a finite positive
+number; booleans rejected; `started_at` unparseable → that stream
+drops out of the age average, HHI still computed); a single huge
+stream dominating hour 1 (HHI drives the spread to at most ×1.20,
+median untouched by concentration); streams started days earlier
+(24/7 or pre-launch waiting streams — age clipped at 16 h);
+`checkpoint` missing or unparseable (age neutral, HHI still
+computed); fewer than 5 usable entries (whole adjustment off).
+When the regression itself cannot be fitted, v5 falls back to the
+house baseline exactly as v2 does (no streams adjustment there).
+
+Known counter-reading (documented, not resolved): a stream that
+has already lasted 10+ h is a survivor — marathon launch streamers
+may be *more* likely to keep going than a fresh stream. The
+region-mix reading above is the basis for the sign, and the 0.10
+cap is what bounds the damage if the counter-reading is right.
+
+### 10.4 Validation performed
+
+- **LOO, streams absent:** gradual 0.1653 / 0.1258 (n=25),
+  console-only 0.1481 / 0.1164 (n=8), all 0.3386 / 0.2060 (n=37),
+  sharp 0.6995 (n=12), high-p1 0.1426 — identical to v2.
+- **Practice outputs byte-identical to v2** (streams None in
+  p00–p03); deterministic byte-identical reruns; ~0.19 s for all
+  four cases (~0.05 s/case).
+- **Synthetic tests** (p00 copied, streams attached; v5 output
+  compared with v2 on the same files; median shift = log ratio of
+  medians, spread mult = ratio of log(q95/q05) widths):
+
+| scenario | median shift h2 / h5 / h8 / h9 | spread mult h2 / h8 / h12 | verdict |
+|---|---|---|---|
+| young EU-heavy (ages 0.2–1 h, near-equal viewers) | +0.090 / +0.090 / +0.022 / 0 | 0.978 / 0.978 / 1.000 | intended direction, within caps |
+| old APAC-heavy (ages 10–14 h) | −0.100 / −0.100 / −0.025 / 0 | 0.978 / 0.978 / 1.000 | capped at −0.10 as designed |
+| concentrated (one stream 60% of top-20) | +0.080 / +0.080 / +0.020 / 0 | 1.141 / 1.141 / 1.000 | spread widens, median from age only |
+| diffuse (20 equal streams) | +0.060 / +0.060 / +0.015 / 0 | 0.975 / 0.975 / 1.000 | narrower spread as designed |
+| extreme (one stream 95%, age 16 h) | −0.100 / −0.100 / −0.025 / 0 | 1.200 / 1.200 / 1.000 | both caps bind, output still valid |
+| streams None / [] / "junk" / no-viewers rows / only 3 entries | 0 / 0 / 0 / 0 | 1.000 everywhere | byte-identical to v2 |
+| started_at garbage / null for all | median 0 | 0.975 | age neutral, HHI still applied |
+| checkpoint key deleted | median 0 | 0.978 | age neutral, HHI still applied |
+
+All synthetic outputs valid (23 rows, hours 2–24, 5 finite
+non-decreasing quantiles each, > 0, ≤ 1e9). No synthetic case
+exceeded the ±0.10 median cap or the [0.90, 1.20] spread range.
